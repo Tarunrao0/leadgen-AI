@@ -1,161 +1,161 @@
-import streamlit as st
-import pandas as pd
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Optional
 from scrape import scrape_multiple
 from parse import parse_with_ollama
-from outreach import generate_outreach, get_template_options, TEMPLATES
-import pyperclip
+from outreach import generate_outreach, TEMPLATES
+import uvicorn
+import time
+import re
 
-# Initialize session state
-if 'leads_df' not in st.session_state:
-    st.session_state.leads_df = pd.DataFrame()
+# Initialize FastAPI with enhanced CORS settings
+app = FastAPI(title="LeadGen AI API")
 
-st.title("🚀 LeadGen AI")
+# Configure CORS middleware
+origins = [
+    "https://docs.google.com",      # Google Sheets
+    "https://script.google.com",    # Google Apps Script
+    "https://*.googleusercontent.com",  # Google preview domains
+    "https://*.ngrok-free.app",     # All ngrok domains
+    "http://localhost",             # Local development
+    "http://localhost:3000",        # Common dev server port
+]
 
-# --- Tab Layout ---
-tab1, tab2 = st.tabs(["🔍 Extract Data", "✉️ Create Outreach"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600  # Cache preflight requests for 10 minutes
+)
 
-with tab1:
-    # --- URL Input Section ---
-    st.header("Step 1: Enter URLs")
-    urls_text = st.text_area(
-        "Paste URLs (one per line or comma-separated):",
-        height=150,
-        placeholder="https://example.com\nhttps://example.org"
-    )
+# Middleware to handle preflight OPTIONS requests
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "OPTIONS":
+        response.headers["Access-Control-Allow-Origin"] = request.headers.get("origin", "*")
+        response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Max-Age"] = "600"
+    return response
 
-    uploaded_file = st.file_uploader(
-        "Or upload CSV file:",
-        type=["csv"]
-    )
+# Data models
+class ExtractionRequest(BaseModel):
+    urls: List[str]
+    fields: List[str]
+    
+class OutreachRequest(BaseModel):
+    url: str
+    template_key: str
+    product: str
+    company_data: Dict[str, str]
+    custom_hook: Optional[str] = None
 
-    # --- Extraction Prompt ---
-    st.header("Step 2: What to Extract?")
-    parse_prompt = st.text_area(
-        "Describe what information you want:",
-        height=100,
-        placeholder="e.g., 'Extract company name, founding year, and LinkedIn URL'"
-    )
-
-    # --- Process URLs ---
-    if st.button("Extract Data", type="primary"):
-        if not urls_text and not uploaded_file:
-            st.warning("Please enter URLs or upload a CSV file")
-            st.stop()
+# API endpoints
+@app.post("/extract")
+async def extract_data(request: ExtractionRequest):
+    """Endpoint for extracting data from URLs"""
+    try:
+        start_time = time.time()
         
-        if not parse_prompt:
-            st.warning("Please specify what to extract")
-            st.stop()
-
-        # Get URLs from input
-        def parse_urls(text_input):
-            urls = []
-            lines = [line.strip() for line in text_input.split('\n') if line.strip()]
-            for line in lines:
-                urls.extend([url.strip() for url in line.split(',') if url.strip()])
-            return urls
-
-        urls_to_scrape = []
-        if uploaded_file:
-            try:
-                df = pd.read_csv(uploaded_file)
-                url_col = 'url' if 'url' in df.columns else df.columns[0]
-                urls_to_scrape = df[url_col].dropna().astype(str).tolist()
-            except Exception as e:
-                st.error(f"CSV Error: {str(e)}")
-        else:
-            urls_to_scrape = parse_urls(urls_text)
-
-        # Scrape and process
-        with st.status("Processing URLs...", expanded=True):
-            st.write("🔄 Scraping websites...")
-            scraped_data = scrape_multiple(urls_to_scrape)
+        # Input validation
+        if not request.urls or not request.fields:
+            raise HTTPException(status_code=400, detail="Missing required fields")
             
-            st.write("🔍 Extracting data...")
-            results = []
-            for data in scraped_data:
-                if 'error' in data:
-                    results.append({"url": data['url'], "error": data['error']})
-                    continue
+        if len(request.urls) > 50:
+            raise HTTPException(status_code=400, detail="Maximum 50 URLs per request")
+
+        # Scrape and process data
+        scraped_data = scrape_multiple(request.urls)
+        parse_prompt = ", ".join(request.fields)
+        results = []
+        
+        for data in scraped_data:
+            if 'error' in data:
+                results.append({'url': data['url'], 'error': data['error']})
+                continue
                 
-                try:
-                    llm_output = parse_with_ollama(
-                        dom_chunks=[data['cleaned_content']],
-                        parse_description=parse_prompt
-                    )
-                    
-                    # Convert to dict
-                    result = {"url": data['url']}
-                    for line in llm_output.split('\n'):
-                        if '::' in line:
-                            key, val = line.split('::', 1)
-                            result[key.strip().lower()] = val.strip()
-                    results.append(result)
-                except Exception as e:
-                    results.append({"url": data['url'], "error": str(e)})
+            try:
+                llm_output = parse_with_ollama(
+                    dom_chunks=[data['cleaned_content']],
+                    parse_description=parse_prompt
+                )
+                
+                result = {'url': data['url']}
+                
+                for line in llm_output.split('\n'):
+                    if '::' in line:
+                        key, val = line.split('::', 1)
+                        key = re.sub(r'[^\w\s]', '', key).strip().lower()
+                        result[key] = val.strip()
+                
+                results.append(result)
+                
+            except Exception as e:
+                results.append({'url': data['url'], 'error': str(e)})
+                
+        return {'data': results, 'time_elapsed': time.time() - start_time}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/generate-outreach")
+async def generate_outreach_message(request: OutreachRequest):
+    """Endpoint for generating outreach messages"""
+    try:
+        start_time = time.time()
+        
+        # Prepare company data with custom hook if provided
+        company_data = request.company_data
+        if request.custom_hook:
+            company_data['custom_hook'] = request.custom_hook
             
-            st.session_state.leads_df = pd.DataFrame(results)
-            st.success("✅ Extraction complete!")
-
-    # --- Show Results ---
-    if not st.session_state.leads_df.empty:
-        st.header("📊 Extracted Data")
-        st.dataframe(st.session_state.leads_df)
-        
-        # Download
-        csv = st.session_state.leads_df.to_csv(index=False)
-        st.download_button(
-            "Download as CSV",
-            data=csv,
-            file_name="leads.csv",
-            mime="text/csv"
-        )
-
-with tab2:
-    st.header("Generate Outreach Messages")
-    
-    if st.session_state.leads_df.empty:
-        st.warning("No data found. Extract some leads first!")
-        st.stop()
-    
-    # Template Selection
-    selected_template = st.selectbox(
-        "Choose a template:",
-        options=get_template_options()
-    )
-    
-    # Template Preview
-    with st.expander("Template Preview"):
-        st.write(TEMPLATES[selected_template]["prompt"])
-    
-    # Product Info
-    product = st.text_input(
-        "Your product/service:",
-        placeholder="AI-powered CRM for startups"
-    )
-    
-    # Generate Message
-    lead_to_message = st.selectbox(
-        "Select lead:",
-        options=st.session_state.leads_df['url']
-    )
-    
-    if st.button("Generate Message"):
-        lead_data = st.session_state.leads_df[
-            st.session_state.leads_df['url'] == lead_to_message
-        ].iloc[0].to_dict()
-        
         message = generate_outreach(
-            template_key=selected_template,
-            company_data=lead_data,
-            product=product
+            template_key=request.template_key,
+            company_data=company_data,
+            product=request.product
         )
         
-        st.text_area("Your Message", message, height=200)
-        
-        if st.button("Copy to Clipboard"):
-            pyperclip.copy(message)
-            st.success("Copied!")
+        return {
+            "message": message,
+            "time_elapsed": time.time() - start_time,
+            "template_used": request.template_key
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- Footer ---
-st.divider()
-st.caption("Tip: Use specific extraction prompts like 'Get CEO emails and recent funding rounds'")
+@app.get("/template-options")
+async def get_template_options():
+    """Endpoint to get available outreach templates"""
+    try:
+        return list(TEMPLATES.keys())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "service": "LeadGen AI API",
+        "version": "1.1.0",
+        "features": {
+            "extraction": True,
+            "outreach": True,
+            "template_options": True
+        }
+    }
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        timeout_keep_alive=30
+    )

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top" />
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 10px;
+        margin: 0;
+      }
+      .container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+      select,
+      textarea,
+      input,
+      button {
+        margin-bottom: 10px;
+        width: 100%;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      textarea {
+        height: 100px;
+        resize: vertical;
+      }
+      #messageOutput {
+        flex-grow: 1;
+        border: 1px solid #ddd;
+        padding: 10px;
+        overflow-y: auto;
+        margin-bottom: 10px;
+        white-space: pre-wrap;
+      }
+      button {
+        background-color: #4285f4;
+        color: white;
+        border: none;
+        padding: 10px;
+        cursor: pointer;
+      }
+      button:hover {
+        background-color: #3367d6;
+      }
+      .loading {
+        text-align: center;
+        color: #666;
+      }
+      .error {
+        color: #d32f2f;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h3>Generate Outreach Message</h3>
+
+      <div id="companyInfo">
+        <p>Select a cell with a company URL to auto-fill data.</p>
+      </div>
+
+      <select id="templateSelect">
+        <option value="">Loading templates...</option>
+      </select>
+
+      <input type="text" id="productInput" placeholder="Your product/service" />
+
+      <textarea id="customHook" placeholder="Custom hook (optional)"></textarea>
+
+      <button id="generateBtn">Generate Message</button>
+
+      <div id="messageOutput">Your generated message will appear here.</div>
+
+      <button id="copyBtn">Copy to Clipboard</button>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        // Load template options
+        google.script.run
+          .withSuccessHandler(populateTemplates)
+          .withFailureHandler(showError)
+          .getTemplateOptions();
+
+        // Check for selected data
+        checkSelectedData();
+
+        // Set up event listeners
+        document
+          .getElementById("generateBtn")
+          .addEventListener("click", generateMessage);
+        document
+          .getElementById("copyBtn")
+          .addEventListener("click", copyToClipboard);
+      });
+
+      function populateTemplates(templates) {
+        const select = document.getElementById("templateSelect");
+        select.innerHTML = "";
+
+        if (templates.length === 0) {
+          select.innerHTML = '<option value="">No templates available</option>';
+          return;
+        }
+
+        templates.forEach((template) => {
+          const option = document.createElement("option");
+          option.value = template;
+          option.textContent = template;
+          select.appendChild(option);
+        });
+      }
+
+      function checkSelectedData() {
+        google.script.run
+          .withSuccessHandler(updateCompanyInfo)
+          .withFailureHandler(showError)
+          .getSelectedData();
+      }
+
+      function updateCompanyInfo(companyData) {
+        const companyInfoDiv = document.getElementById("companyInfo");
+
+        if (companyData) {
+          let html = "<p><strong>Company Data:</strong></p><ul>";
+          for (const [key, value] of Object.entries(companyData)) {
+            if (value && key !== "url") {
+              html += `<li><strong>${key}:</strong> ${value}</li>`;
+            }
+          }
+          html += "</ul>";
+          companyInfoDiv.innerHTML = html;
+        } else {
+          companyInfoDiv.innerHTML =
+            "<p>Select a cell with a company URL to auto-fill data.</p>";
+        }
+      }
+
+      function generateMessage() {
+        const template = document.getElementById("templateSelect").value;
+        const product = document.getElementById("productInput").value;
+        const customHook = document.getElementById("customHook").value;
+
+        if (!template || !product) {
+          showError("Please select a template and enter your product");
+          return;
+        }
+
+        document.getElementById("messageOutput").innerHTML =
+          '<div class="loading">Generating message...</div>';
+
+        google.script.run
+          .withSuccessHandler(displayMessage)
+          .withFailureHandler(showError)
+          .generateOutreachMessage(template, product, {
+            custom_hook: customHook,
+            ...getCurrentCompanyData(),
+          });
+      }
+
+      function getCurrentCompanyData() {
+        // This would be more sophisticated in a real implementation
+        const companyInfoDiv = document.getElementById("companyInfo");
+        // In a real app, you'd parse the displayed data or store it in a variable
+        // For simplicity, we'll just return an empty object here
+        return {};
+      }
+
+      function displayMessage(response) {
+        const outputDiv = document.getElementById("messageOutput");
+
+        if (response.error) {
+          outputDiv.innerHTML = `<div class="error">${response.error}</div>`;
+        } else {
+          outputDiv.textContent = response.message || response;
+        }
+      }
+
+      function showError(error) {
+        document.getElementById(
+          "messageOutput"
+        ).innerHTML = `<div class="error">${
+          typeof error === "string" ? error : error.message
+        }</div>`;
+      }
+
+      function copyToClipboard() {
+        const message = document.getElementById("messageOutput").textContent;
+        navigator.clipboard
+          .writeText(message)
+          .then(() => {
+            alert("Message copied to clipboard!");
+          })
+          .catch((err) => {
+            showError("Failed to copy: " + err);
+          });
+      }
+    </script>
+  </body>
+</html>
